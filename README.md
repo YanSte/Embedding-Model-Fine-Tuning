@@ -1,266 +1,193 @@
-# Embedding Model
+# Finetune
+In this example, we show how to finetune the baai-general-embedding with your data.
 
-
-## Frequently asked questions
-
-**The very poor results caused by incorrect usage**
-
-Different from other embedding models using mean pooling, BGE uses the last hidden state of `[cls]` as the sentence embedding: `sentence_embeddings = model_output[0][:, 0]`.
-If you use mean pooling, there will be a significant decrease in performance. 
-Therefore, make sure to use the correct method to obtain sentence vectors. You can refer to the usage method we provide. 
-
-
-
-**1. How to fine-tune bge embedding model?**
-
-Following this [example](https://github.com/FlagOpen/FlagEmbedding/tree/master/examples/finetune) to prepare data and fine-tune your model. 
-Some suggestions:
-- Mine hard negatives following this [example](https://github.com/FlagOpen/FlagEmbedding/tree/master/examples/finetune#hard-negatives), which can improve the retrieval performance.
-- In general, larger hyper-parameter `per_device_train_batch_size` brings better performance. You can expand it by enabling `--fp16`, `--deepspeed df_config.json` (df_config.json can refer to [ds_config.json](https://github.com/FlagOpen/FlagEmbedding/blob/master/examples/finetune/ds_config.json), `--gradient_checkpointing`, etc.
-- If you want to maintain the performance on other tasks when fine-tuning on your data, you can use [LM-Cocktail](https://github.com/FlagOpen/FlagEmbedding/tree/master/LM_Cocktail) to merge the fine-tuned model and the original bge model. Besides, if you want to fine-tune on multiple tasks, you also can approximate the multi-task learning via model merging as [LM-Cocktail](https://github.com/FlagOpen/FlagEmbedding/tree/master/LM_Cocktail).
-- If you pre-train bge on your data, the pre-trained model cannot be directly used to calculate similarity, and it must be fine-tuned with contrastive learning before computing similarity.
-- If the accuracy of the fine-tuned model is still not high, it is recommended to use/fine-tune the cross-encoder model (bge-reranker) to re-rank top-k results. Hard negatives also are needed to fine-tune reranker.
-
-Here is the way we used to fine-tune `bge-large-zh-v1.5`: 
-The fine-tuning datasets consist of t2ranking, dulreader, mmarco, cmedqav2, mulit-cpr, nli-zh, ocmnli, and cmnli.
-For t2ranking, dulreader, and mmarco, we mine hard negatives; 
-For nli-zh, ocmnli, and cmnli, we use the pairs whose label equal to 0 as negatives;
-For cmedqav2 and mulit-cpr, we randomly sample negatives.
-The settings of fine-tuning are: train_group_size=2, learning_rate=1e-5, max_epoch=5.
-We train two models: one fine-tune with `--query_instruction_for_retrieval "为这个句子生成表示以用于检索相关文章："`, 
-and the other model is fine-tuned with `--query_instruction_for_retrieval ""`, 
-and then we merge two variants into one model to make the final model can be used both with and without instruction.
-
-
-<details>
-  <summary>2. The similarity score between two dissimilar sentences is higher than 0.5</summary>
-
-  <!-- ### The similarity score between two dissimilar sentences is higher than 0.5 -->
-**Suggest to use bge v1.5, which alleviates the issue of the similarity distribution.** 
-
-Since we finetune the models by contrastive learning with a temperature of 0.01, 
-the similarity distribution of the current BGE model is about in the interval \[0.6, 1\].
-So a similarity score greater than 0.5 does not indicate that the two sentences are similar.
-
-For downstream tasks, such as passage retrieval or semantic similarity, 
-**what matters is the relative order of the scores, not the absolute value.**
-If you need to filter similar sentences based on a similarity threshold, 
-please select an appropriate similarity threshold based on the similarity distribution on your data (such as 0.8, 0.85, or even 0.9).
-
-</details>
-
-<details>
-  <summary>3. When does the query instruction need to be used</summary>
-
-  <!-- ### When does the query instruction need to be used -->
-
-For the `bge-*-v1.5`, we improve its retrieval ability when not using instruction. 
-No instruction only has a slight degradation in retrieval performance compared with using instruction. 
-So you can generate embedding without instruction in all cases for convenience.
- 
-For a retrieval task that uses short queries to find long related documents, 
-it is recommended to add instructions for these short queries.
-**The best method to decide whether to add instructions for queries is choosing the setting that achieves better performance on your task.**
-In all cases, the documents/passages do not need to add the instruction. 
-
-</details>
-
-
-## Usage
-
-### Using FlagEmbedding
-
-Install: 
-```
-git clone https://github.com/FlagOpen/FlagEmbedding.git
-cd FlagEmbedding
-pip install -e .
-```
-or: 
+## 1. Installation
+* **with pip**
 ```
 pip install -U FlagEmbedding
 ```
+
+* **from source**
+```
+git clone https://github.com/FlagOpen/FlagEmbedding.git
+cd FlagEmbedding
+pip install  .
+```
+For development, install as editable:
+```
+pip install -e .
+```
+
  
 
+## 2. Data format
+Train data should be a json file, where each line is a dict like this:
+
+```
+{"query": str, "pos": List[str], "neg":List[str]}
+```
+
+`query` is the query, and `pos` is a list of positive texts, `neg` is a list of negative texts.
+If you have no negative texts for a query, you can random sample some from the entire corpus as the negatives.
+
+See [toy_finetune_data.jsonl](https://github.com/FlagOpen/FlagEmbedding/blob/master/examples/finetune/toy_finetune_data.jsonl) for a toy data file.
+
+### Hard Negatives 
+
+Hard negatives is a widely used method to improve the quality of sentence embedding. 
+You can mine hard negatives following this command:
+```bash
+python -m FlagEmbedding.baai_general_embedding.finetune.hn_mine \
+--model_name_or_path BAAI/bge-base-en-v1.5 \
+--input_file toy_finetune_data.jsonl \
+--output_file toy_finetune_data_minedHN.jsonl \
+--range_for_sampling 2-200 \
+--negative_number 15 \
+--use_gpu_for_searching 
+```
+
+- `input_file`: json data for finetuning. This script will retrieve top-k documents for each query, 
+and random sample negatives from the top-k documents (not including the positive documents).
+- `output_file`: path to save JSON data with mined hard negatives for finetuning
+- `negative_number`: the number of sampled negatives 
+- `range_for_sampling`: where to sample negative. For example, `2-100` means sampling `negative_number` negatives from top2-top200 documents. **You can set larger value to reduce the difficulty of negatives (e.g., set it `60-300` to sample negatives from top60-300 passages)**
+- `candidate_pool`: The pool to retrieval. The default value is None, and this script will retrieve from the combination of all `neg` in `input_file`. 
+The format of this file is the same as [pretrain data](https://github.com/FlagOpen/FlagEmbedding/tree/master/examples/pretrain#2-data-format). If input a candidate_pool, this script will retrieve negatives from this file.
+- `use_gpu_for_searching`: whether to use faiss-gpu to retrieve negatives.
+
+
+## 3. Train
+```
+torchrun --nproc_per_node {number of gpus} \
+-m FlagEmbedding.baai_general_embedding.finetune.run \
+--output_dir {path to save model} \
+--model_name_or_path BAAI/bge-large-zh-v1.5 \
+--train_data ./toy_finetune_data.jsonl \
+--learning_rate 1e-5 \
+--fp16 \
+--num_train_epochs 5 \
+--per_device_train_batch_size {large batch size; set 1 for toy data} \
+--dataloader_drop_last True \
+--normlized True \
+--temperature 0.02 \
+--query_max_len 64 \
+--passage_max_len 256 \
+--train_group_size 2 \
+--negatives_cross_device \
+--logging_steps 10 \
+--save_steps 1000 \
+--query_instruction_for_retrieval "" 
+```
+
+**some important arguments**:
+- `per_device_train_batch_size`: batch size in training. In most of cases, larger batch size will bring stronger performance. You can expand it by enabling `--fp16`, `--deepspeed ./df_config.json` (df_config.json can refer to [ds_config.json](./ds_config.json)), `--gradient_checkpointing`, etc. 
+- `train_group_size`: the number of positive and negatives for a query in training.
+There are always one positive, so this argument will control the number of negatives (#negatives=train_group_size-1).
+Noted that the number of negatives should not be larger than the numbers of negatives in data `"neg":List[str]`.
+Besides the negatives in this group, the in-batch negatives also will be used in fine-tuning.
+- `negatives_cross_device`: share the negatives across all GPUs. This argument will extend the number of negatives.
+- `learning_rate`: select a appropriate for your model. Recommend 1e-5/2e-5/3e-5 for large/base/small-scale. 
+- `temperature`: It will influence the distribution of similarity scores. **Recommend set it 0.01-0.1.**
+- `query_max_len`: max length for query. Please set it according the average length of queries in your data.
+- `passage_max_len`: max length for passage. Please set it according the average length of passages in your data.
+- `query_instruction_for_retrieval`: instruction for query, which will be added to each query. You also can set it `""` to add nothing to query.
+- `use_inbatch_neg`: use passages in the same batch as negatives. Default value is True. 
+- `save_steps`: for setting how many training steps to save a checkpoint.
+
+For more training arguments please refer to [transformers.TrainingArguments](https://huggingface.co/docs/transformers/main_classes/trainer#transformers.TrainingArguments)
+
+
+### 4. Model merging via [LM-Cocktail](https://github.com/FlagOpen/FlagEmbedding/tree/master/LM_Cocktail) [optional]
+
+For more details please refer to [LM-Cocktail](https://github.com/FlagOpen/FlagEmbedding/tree/master/LM_Cocktail).
+
+Fine-tuning the base bge model can improve its performance on target task, 
+but maybe lead to severe degeneration of model’s general capabilities 
+beyond the targeted domain (e.g., lower performance on c-mteb tasks). 
+By merging the fine-tuned model and the base model, 
+LM-Cocktail can significantly enhance performance in downstream task
+while maintaining performance in other unrelated tasks.
+
 ```python
-from FlagEmbedding import FlagModel
-sentences_1 = ["样例数据-1", "样例数据-2"]
-sentences_2 = ["样例数据-3", "样例数据-4"]
-model = FlagModel('BAAI/bge-large-zh-v1.5', 
-                  query_instruction_for_retrieval="为这个句子生成表示以用于检索相关文章：",
-                  use_fp16=True) # Setting use_fp16 to True speeds up computation with a slight performance degradation
-embeddings_1 = model.encode(sentences_1)
-embeddings_2 = model.encode(sentences_2)
-similarity = embeddings_1 @ embeddings_2.T
-print(similarity)
+from LM_Cocktail import mix_models, mix_models_with_data
 
-# for s2p(short query to long passage) retrieval task, suggest to use encode_queries() which will automatically add the instruction to each query
-# corpus in retrieval task can still use encode() or encode_corpus(), since they don't need instruction
-queries = ['query_1', 'query_2']
-passages = ["样例文档-1", "样例文档-2"]
-q_embeddings = model.encode_queries(queries)
-p_embeddings = model.encode(passages)
-scores = q_embeddings @ p_embeddings.T
+# Mix fine-tuned model and base model; then save it to output_path: ./mixed_model_1
+model = mix_models(
+    model_names_or_paths=["BAAI/bge-large-en-v1.5", "your_fine-tuned_model"], 
+    model_type='encoder', 
+    weights=[0.5, 0.5],  # you can change the weights to get a better trade-off.
+    output_path='./mixed_model_1')
 ```
-For the value of the argument `query_instruction_for_retrieval`, see [Model List](https://github.com/FlagOpen/FlagEmbedding/tree/master#model-list). 
 
-By default, FlagModel will use all available GPUs when encoding. Please set `os.environ["CUDA_VISIBLE_DEVICES"]` to select specific GPUs.
-You also can set `os.environ["CUDA_VISIBLE_DEVICES"]=""` to make all GPUs unavailable.
-
-
-### Using Sentence-Transformers
-
-You can also use the `bge` models with [sentence-transformers](https://www.SBERT.net):
-
-```
-pip install -U sentence-transformers
-```
+If you have a new task, and there is no data or resource can be used for fine-tuning, 
+you can try to use LM-Cocktail to merge existing models (from open-source community or your models fine-tuned on other tasks) to produce a task-specific model. 
+In this way, you just need to construct a few example data and don't need fine-tuning the base model.
+For example, you can merge the models from [huggingface](https://huggingface.co/Shitao) using the example data for your task:
 ```python
-from sentence_transformers import SentenceTransformer
-sentences_1 = ["样例数据-1", "样例数据-2"]
-sentences_2 = ["样例数据-3", "样例数据-4"]
-model = SentenceTransformer('BAAI/bge-large-zh-v1.5')
-embeddings_1 = model.encode(sentences_1, normalize_embeddings=True)
-embeddings_2 = model.encode(sentences_2, normalize_embeddings=True)
-similarity = embeddings_1 @ embeddings_2.T
-print(similarity)
+from LM_Cocktail import mix_models, mix_models_with_data
+
+example_data = [
+    {"query": "How does one become an actor in the Telugu Film Industry?", "pos": [" How do I become an actor in Telugu film industry?"], "neg": [" What is the story of Moses and Ramesses?", " Does caste system affect economic growth of India?"]}, 
+    {"query": "Why do some computer programmers develop amazing software or new concepts, while some are stuck with basic programming work?", "pos": [" Why do some computer programmers develops amazing softwares or new concepts, while some are stuck with basics programming works?"], "neg": [" When visiting a friend, do you ever think about what would happen if you did something wildly inappropriate like punch them or destroy their furniture?", " What is the difference between a compliment and flirting?"]}
+]
+
+model = mix_models_with_data(
+    model_names_or_paths=["BAAI/bge-base-en-v1.5", "Shitao/bge-hotpotqa", "Shitao/bge-quora"], 
+    model_type='encoder', 
+    example_ata=example_data,
+    temperature=5.0,
+    max_input_length=512,
+    neg_number=2)
 ```
-For s2p(short query to long passage) retrieval task, 
-each short query should start with an instruction (instructions see [Model List](https://github.com/FlagOpen/FlagEmbedding/tree/master#model-list)). 
-But the instruction is not needed for passages.
+**Since there are only 9 `bge-*` models in this [repo](https://huggingface.co/Shitao), the performance may not be satisfactory when your task is different with all 9 fine-tuning tasks. 
+You can fine-tune the base model on more tasks and merge them to achieve better performance on your task.**
+
+
+### 5. Load your model
+After fine-tuning BGE model, you can load it easily in the same way as [here](https://github.com/FlagOpen/FlagEmbedding/tree/master/FlagEmbedding/baai_general_embedding#usage) 
+
+Please replace the `query_instruction_for_retrieval` with your instruction if you set a different value for hyper-parameter `--query_instruction_for_retrieval` when fine-tuning.
+
+
+### 6. Evaluate model
+We provide [a simple script](https://github.com/FlagOpen/FlagEmbedding/tree/master/FlagEmbedding/baai_general_embedding/finetune/eval_msmarco.py) to evaluate the model's performance on MSMARCO, a widely used retrieval benchmark. 
+
+First, install `faiss`, a popular approximate nearest neighbor search library:
+```bash
+conda install -c conda-forge faiss-gpu
+```
+
+Next, you can check the data formats for the [msmarco corpus](https://huggingface.co/datasets/namespace-Pt/msmarco-corpus) and [evaluation queries](https://huggingface.co/datasets/namespace-Pt/msmarco). 
+
+Finally, run the following command:
+
+```bash
+python -m FlagEmbedding.baai_general_embedding.finetune.eval_msmarco \
+--encoder BAAI/bge-base-en-v1.5 \
+--fp16 \
+--add_instruction \
+--k 100
+```
+**some important arguments:**
+- `encoder`: specify the encoder model, which can be either a model on huggingface or a local one.
+- `fp16`: use half precision for inference.
+- `add_instruction`: add retrieval instruction (`Represent this sentence for searching relevant passages: `).
+- `k`: specify how many nearest neighbors to retrieve for each query.
+
+The results should be similar to
 ```python
-from sentence_transformers import SentenceTransformer
-queries = ['query_1', 'query_2']
-passages = ["样例文档-1", "样例文档-2"]
-instruction = "为这个句子生成表示以用于检索相关文章："
-
-model = SentenceTransformer('BAAI/bge-large-zh-v1.5')
-q_embeddings = model.encode([instruction+q for q in queries], normalize_embeddings=True)
-p_embeddings = model.encode(passages, normalize_embeddings=True)
-scores = q_embeddings @ p_embeddings.T
-```
-
-### Using Langchain 
-
-You can use `bge` in langchain like this:
-```python
-from langchain.embeddings import HuggingFaceBgeEmbeddings
-model_name = "BAAI/bge-large-en-v1.5"
-model_kwargs = {'device': 'cuda'}
-encode_kwargs = {'normalize_embeddings': True} # set True to compute cosine similarity
-model = HuggingFaceBgeEmbeddings(
-    model_name=model_name,
-    model_kwargs=model_kwargs,
-    encode_kwargs=encode_kwargs,
-    query_instruction="为这个句子生成表示以用于检索相关文章："
-)
-model.query_instruction = "为这个句子生成表示以用于检索相关文章："
-```
-
-
-### Using HuggingFace Transformers
-
-With the transformers package, you can use the model like this: First, you pass your input through the transformer model, then you select the last hidden state of the first token (i.e., [CLS]) as the sentence embedding.
-
-```python
-from transformers import AutoTokenizer, AutoModel
-import torch
-# Sentences we want sentence embeddings for
-sentences = ["样例数据-1", "样例数据-2"]
-
-# Load model from HuggingFace Hub
-tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-large-zh-v1.5')
-model = AutoModel.from_pretrained('BAAI/bge-large-zh-v1.5')
-model.eval()
-
-# Tokenize sentences
-encoded_input = tokenizer(sentences, padding=True, truncation=True, return_tensors='pt')
-# for s2p(short query to long passage) retrieval task, add an instruction to query (not add instruction for passages)
-# encoded_input = tokenizer([instruction + q for q in queries], padding=True, truncation=True, return_tensors='pt')
-
-# Compute token embeddings
-with torch.no_grad():
-    model_output = model(**encoded_input)
-    # Perform pooling. In this case, cls pooling.
-    sentence_embeddings = model_output[0][:, 0]
-# normalize embeddings
-sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-print("Sentence embeddings:", sentence_embeddings)
-```
-
-
-## Evaluation  
-
-`baai-general-embedding` models achieve **state-of-the-art performance on both MTEB and C-MTEB leaderboard!**
-For more details and evaluation tools see our [scripts](https://github.com/FlagOpen/FlagEmbedding/blob/master/C_MTEB/README.md)
-- **MTEB**:   
-
-| Model Name |  Dimension | Sequence Length | Average (56) | Retrieval (15) |Clustering (11) | Pair Classification (3) | Reranking (4) |  STS (10) | Summarization (1) | Classification (12) |
-|:----:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| [BAAI/bge-large-en-v1.5](https://huggingface.co/BAAI/bge-large-en-v1.5) | 1024 | 512 |  **64.23** | **54.29** |  46.08 | 87.12 | 60.03 | 83.11 | 31.61 | 75.97 |  
-| [BAAI/bge-base-en-v1.5](https://huggingface.co/BAAI/bge-base-en-v1.5) |  768 | 512 | 63.55 | 53.25 |   45.77 | 86.55 | 58.86 | 82.4 | 31.07 | 75.53 |  
-| [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) |  384 | 512 | 62.17 |51.68 | 43.82 |  84.92 | 58.36 | 81.59 | 30.12 | 74.14 |  
-| [bge-large-en](https://huggingface.co/BAAI/bge-large-en) |  1024 | 512 | 63.98 |  53.9 | 46.98 | 85.8 | 59.48 | 81.56 | 32.06 | 76.21 | 
-| [bge-base-en](https://huggingface.co/BAAI/bge-base-en) |  768 | 512 |  63.36 | 53.0 | 46.32 | 85.86 | 58.7 | 81.84 | 29.27 | 75.27 | 
-| [gte-large](https://huggingface.co/thenlper/gte-large) |  1024 | 512 | 63.13 | 52.22 | 46.84 | 85.00 | 59.13 | 83.35 | 31.66 | 73.33 |
-| [gte-base](https://huggingface.co/thenlper/gte-base) 	|  768 | 512 | 62.39 | 51.14 | 46.2 | 84.57 | 58.61 | 82.3 | 31.17 | 73.01 |
-| [e5-large-v2](https://huggingface.co/intfloat/e5-large-v2) |  1024| 512 | 62.25 | 50.56 | 44.49 | 86.03 | 56.61 | 82.05 | 30.19 | 75.24 |
-| [bge-small-en](https://huggingface.co/BAAI/bge-small-en) |  384 | 512 | 62.11 |  51.82 | 44.31 | 83.78 | 57.97 | 80.72 | 30.53 | 74.37 |  
-| [instructor-xl](https://huggingface.co/hkunlp/instructor-xl) |  768 | 512 | 61.79 | 49.26 | 44.74 | 86.62 | 57.29 | 83.06 | 32.32 | 61.79 |
-| [e5-base-v2](https://huggingface.co/intfloat/e5-base-v2) |  768 | 512 | 61.5 | 50.29 | 43.80 | 85.73 | 55.91 | 81.05 | 30.28 | 73.84 |
-| [gte-small](https://huggingface.co/thenlper/gte-small) |  384 | 512 | 61.36 | 49.46 | 44.89 | 83.54 | 57.7 | 82.07 | 30.42 | 72.31 |
-| [text-embedding-ada-002](https://platform.openai.com/docs/guides/embeddings) | 1536 | 8192 | 60.99 | 49.25 | 45.9 | 84.89 | 56.32 | 80.97 | 30.8 | 70.93 |
-| [e5-small-v2](https://huggingface.co/intfloat/e5-base-v2) | 384 | 512 | 59.93 | 49.04 | 39.92 | 84.67 | 54.32 | 80.39 | 31.16 | 72.94 |
-| [sentence-t5-xxl](https://huggingface.co/sentence-transformers/sentence-t5-xxl) |  768 | 512 | 59.51 | 42.24 | 43.72 | 85.06 | 56.42 | 82.63 | 30.08 | 73.42 |
-| [all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2) 	|  768 | 514 	| 57.78 | 43.81 | 43.69 | 83.04 | 59.36 | 80.28 | 27.49 | 65.07 |
-| [sgpt-bloom-7b1-msmarco](https://huggingface.co/bigscience/sgpt-bloom-7b1-msmarco) 	|  4096 | 2048 | 57.59 | 48.22 | 38.93 | 81.9 | 55.65 | 77.74 | 33.6 | 66.19 |
-
-
-
-- **C-MTEB**:  
-We create the benchmark C-MTEB for Chinese text embedding which consists of 31 datasets from 6 tasks. 
-Please refer to [C_MTEB](https://github.com/FlagOpen/FlagEmbedding/blob/master/C_MTEB/README.md) for a detailed introduction.
- 
-| Model | Embedding dimension | Avg | Retrieval | STS | PairClassification | Classification | Reranking | Clustering |
-|:-------------------------------|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|:--------:|
-| [**BAAI/bge-large-zh-v1.5**](https://huggingface.co/BAAI/bge-large-zh-v1.5) | 1024 |  **64.53** | 70.46 | 56.25 | 81.6 | 69.13 | 65.84 | 48.99 |  
-| [BAAI/bge-base-zh-v1.5](https://huggingface.co/BAAI/bge-base-zh-v1.5) | 768 |  63.13 | 69.49 | 53.72 | 79.75 | 68.07 | 65.39 | 47.53 |  
-| [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) | 512 | 57.82 | 61.77 | 49.11 | 70.41 | 63.96 | 60.92 | 44.18 |   
-| [BAAI/bge-large-zh](https://huggingface.co/BAAI/bge-large-zh) | 1024 | 64.20 | 71.53 | 54.98 | 78.94 | 68.32 | 65.11 | 48.39 |
-| [bge-large-zh-noinstruct](https://huggingface.co/BAAI/bge-large-zh-noinstruct) | 1024 | 63.53 | 70.55 | 53 | 76.77 | 68.58 | 64.91 | 50.01 |
-| [BAAI/bge-base-zh](https://huggingface.co/BAAI/bge-base-zh) | 768 | 62.96 | 69.53 | 54.12 | 77.5 | 67.07 | 64.91 | 47.63 |
-| [multilingual-e5-large](https://huggingface.co/intfloat/multilingual-e5-large) | 1024 | 58.79 | 63.66 | 48.44 | 69.89 | 67.34 | 56.00 | 48.23 |
-| [BAAI/bge-small-zh](https://huggingface.co/BAAI/bge-small-zh) | 512 | 58.27 |  63.07 | 49.45 | 70.35 | 63.64 | 61.48 | 45.09 |
-| [m3e-base](https://huggingface.co/moka-ai/m3e-base) | 768 | 57.10 | 56.91 | 50.47 | 63.99 | 67.52 | 59.34 | 47.68 |
-| [m3e-large](https://huggingface.co/moka-ai/m3e-large) | 1024 |  57.05 | 54.75 | 50.42 | 64.3 | 68.2 | 59.66 | 48.88 |
-| [multilingual-e5-base](https://huggingface.co/intfloat/multilingual-e5-base) | 768 | 55.48 | 61.63 | 46.49 | 67.07 | 65.35 | 54.35 | 40.68 |
-| [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) | 384 | 55.38 | 59.95 | 45.27 | 66.45 | 65.85 | 53.86 | 45.26 |
-| [text-embedding-ada-002(OpenAI)](https://platform.openai.com/docs/guides/embeddings/what-are-embeddings) | 1536 |  53.02 | 52.0 | 43.35 | 69.56 | 64.31 | 54.28 | 45.68 |
-| [luotuo](https://huggingface.co/silk-road/luotuo-bert-medium) | 1024 | 49.37 |  44.4 | 42.78 | 66.62 | 61 | 49.25 | 44.39 |
-| [text2vec-base](https://huggingface.co/shibing624/text2vec-base-chinese) | 768 |  47.63 | 38.79 | 43.41 | 67.41 | 62.19 | 49.45 | 37.66 |
-| [text2vec-large](https://huggingface.co/GanymedeNil/text2vec-large-chinese) | 1024 | 47.36 | 41.94 | 44.97 | 70.86 | 60.66 | 49.16 | 30.02 |
-
-
-
-## Acknowledgement
-
-Part of the code is developed based on [Dense](https://github.com/luyug/Dense).
-
-
-## Citation
-
-If you find this repository useful, please consider giving a star :star: and citation
-
-```
-@misc{bge_embedding,
-      title={C-Pack: Packaged Resources To Advance General Chinese Embedding}, 
-      author={Shitao Xiao and Zheng Liu and Peitian Zhang and Niklas Muennighoff},
-      year={2023},
-      eprint={2309.07597},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
+{
+    'MRR@1': 0.2330945558739255, 
+    'MRR@10': 0.35786976395142633, 
+    'MRR@100': 0.3692618036917553, 
+    'Recall@1': 0.22606255969436478, 
+    'Recall@10': 0.6412965616045848, 
+    'Recall@100': 0.9012774594078318
 }
 ```
 
-
-
+A brief summary of how the script works:
+1. Load the model on all available GPUs through [DataParallel](https://pytorch.org/docs/stable/generated/torch.nn.DataParallel.html). 
+2. Encode the corpus and offload the embeddings in `faiss` Flat index. By default, `faiss` also dumps the index on all available GPUs.
+3. Encode the queries and search `100` nearest neighbors for each query.
+4. Compute Recall and MRR metrics.
